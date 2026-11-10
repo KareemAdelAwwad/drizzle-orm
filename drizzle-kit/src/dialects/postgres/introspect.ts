@@ -340,12 +340,51 @@ export const fromDatabase = async (
 			})
 		: [] as SequenceListItem[];
 
-	// I'm not yet aware of how we handle policies down the pipeline for push,
-	// and since postgres does not have any default policies, we can safely fetch all of them for now
-	// and filter them out in runtime, simplifying filterings
 	progressCallback('policies', 0, 'fetching');
-	const policiesQuery = db.query<
-		{
+	const policiesQuery = filteredNamespacesStringForSQL
+		? db.query<
+			{
+				schema: string;
+				table: string;
+				name: string;
+				as: Policy['as'];
+				to: string | string[];
+				for: Policy['for'];
+				using: string | undefined | null;
+				withCheck: string | undefined | null;
+			}
+		>(`SELECT 
+				schemaname as "schema", 
+				tablename as "table", 
+				policyname as "name", 
+				permissive as "as", 
+				roles as "to", 
+				cmd as "for", 
+				qual as "using", 
+				with_check as "withCheck" 
+			FROM pg_catalog.pg_policies
+			WHERE schemaname IN (${filteredNamespacesStringForSQL})
+			ORDER BY
+				pg_catalog.lower(schemaname),
+				pg_catalog.lower(tablename),
+				pg_catalog.lower(policyname);
+		`).then((rows) => {
+			queryCallback('policies', rows, null);
+			return rows;
+		}).catch((err) => {
+			queryCallback('policies', [], err);
+			return [] as {
+				schema: string;
+				table: string;
+				name: string;
+				as: Policy['as'];
+				to: string | string[];
+				for: Policy['for'];
+				using: string | undefined | null;
+				withCheck: string | undefined | null;
+			}[];
+		})
+		: [] as {
 			schema: string;
 			table: string;
 			name: string;
@@ -354,28 +393,7 @@ export const fromDatabase = async (
 			for: Policy['for'];
 			using: string | undefined | null;
 			withCheck: string | undefined | null;
-		}
-	>(`SELECT 
-			schemaname as "schema", 
-			tablename as "table", 
-			policyname as "name", 
-			permissive as "as", 
-			roles as "to", 
-			cmd as "for", 
-			qual as "using", 
-			with_check as "withCheck" 
-		FROM pg_catalog.pg_policies
-		ORDER BY
-			pg_catalog.lower(schemaname),
-			pg_catalog.lower(tablename),
-			pg_catalog.lower(policyname);
-	`).then((rows) => {
-		queryCallback('policies', rows, null);
-		return rows;
-	}).catch((err) => {
-		queryCallback('policies', [], err);
-		throw err;
-	});
+		}[];
 
 	const rolesQuery = db.query<
 		{
@@ -442,7 +460,7 @@ export const fromDatabase = async (
 				return rows;
 			}).catch((error) => {
 				queryCallback('privileges', [], error);
-				throw error;
+				return [] as PrivilegeListItem[];
 			})
 		: [] as PrivilegeListItem[];
 
@@ -721,13 +739,28 @@ export const fromDatabase = async (
 	}
 
 	for (const it of policiesList) {
+		const cmd = String(it.for ?? '').toUpperCase();
+		const forMapped: Policy['for'] = cmd === '1' || cmd === 'R' || cmd === 'SELECT'
+			? 'SELECT'
+			: cmd === '2' || cmd === 'W' || cmd === 'UPDATE'
+			? 'UPDATE'
+			: cmd === '3' || cmd === 'D' || cmd === 'DELETE'
+			? 'DELETE'
+			: cmd === '4' || cmd === 'A' || cmd === 'INSERT'
+			? 'INSERT'
+			: 'ALL';
+
+		const asMapped: Policy['as'] = String(it.as).toUpperCase() === 'RESTRICTIVE' || (it.as as unknown) === false
+			? 'RESTRICTIVE'
+			: 'PERMISSIVE';
+
 		policies.push({
 			entityType: 'policies',
 			schema: it.schema,
 			table: it.table,
 			name: it.name,
-			as: it.as,
-			for: it.for,
+			as: asMapped,
+			for: forMapped,
 			roles: typeof it.to === 'string' ? it.to.slice(1, -1).split(',') : it.to,
 			using: it.using ?? null,
 			withCheck: it.withCheck ?? null,

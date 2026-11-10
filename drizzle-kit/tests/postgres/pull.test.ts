@@ -4573,3 +4573,66 @@ test.skipIf(needToPostpone)('Issue No6590 #2', async () => {
 	// expect(ddlAfterPull.columns.list().map((it) => [it.name, it.default])).toStrictEqual();
 	// expect(schema2.indexes.map((it) => [it.name, it.columns])).toStrictEqual();
 });
+
+// https://github.com/drizzle-team/drizzle-orm/issues/5583
+test('issue #5583: policy cmd normalization and resilience on Nile DB', async () => {
+	await db.query(`CREATE TABLE "users" (id int);`);
+	await db.query(`ALTER TABLE "users" ENABLE ROW LEVEL SECURITY;`);
+	await db.query(`CREATE POLICY "p_select" ON "users" FOR SELECT USING (true);`);
+
+	const res = await fromDatabase(db);
+	expect(res.policies.length).toBe(1);
+	expect(res.policies[0].for).toBe('SELECT');
+	expect(res.policies[0].as).toBe('PERMISSIVE');
+
+	const wrappedDb: DB = {
+		...db,
+		query: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
+			if (sql.includes('pg_catalog.pg_policies')) {
+				return [
+					{
+						schema: 'public',
+						table: 'users',
+						name: 'nile_update_policy',
+						as: 'PERMISSIVE',
+						to: '{public}',
+						for: 2,
+						using: null,
+						withCheck: null,
+					},
+					{
+						schema: 'public',
+						table: 'users',
+						name: 'nile_select_policy',
+						as: 'permissive',
+						to: '{public}',
+						for: '1',
+						using: null,
+						withCheck: null,
+					},
+				] as T[];
+			}
+			if (sql.includes('information_schema.role_table_grants')) {
+				throw new Error('permission denied for table role_table_grants');
+			}
+			return db.query<T>(sql, params);
+		},
+	};
+
+	const resMock = await fromDatabase(wrappedDb);
+	expect(resMock.policies).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({
+				name: 'nile_update_policy',
+				for: 'UPDATE',
+				as: 'PERMISSIVE',
+			}),
+			expect.objectContaining({
+				name: 'nile_select_policy',
+				for: 'SELECT',
+				as: 'PERMISSIVE',
+			}),
+		]),
+	);
+	expect(resMock.privileges).toEqual([]);
+});
